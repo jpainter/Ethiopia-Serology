@@ -1,0 +1,598 @@
+---
+title: "Ethiopia Serology"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+```{r, include=FALSE}
+library(tidyverse)
+library(scales)
+knitr::opts_chunk$set(message = "")
+```
+
+#Base Survey Files#
+
+## EA file to get basic sampling scheme
+
+```{r}
+ea = readxl::read_excel('MIS 2015 Data/EA.xlsx')
+# View(ea)
+
+glimpse(ea)
+
+range(ea$`EA Code`)
+range(ea$`EA Name`)
+
+```
+
+## Census file to get GPS coordinates of points (such as households), the name of the head of the household and a comment
+
+- filter to key variables: _id,   
+- instanceID , meta-rowID, houseNumber , placeName ,   
+- location_altitude, location_latitude, location_longitude   
+
+```{r}
+cen_raw  = read_csv("MIS 2015 Data/census_mobile.csv")  
+
+# str(cen_raw)
+
+cen = cen_raw %>%
+    select(
+        `_id`, houseNumber , placeName , `_savepoint_timestamp` , 
+        sampleFrame , selected, valid, 
+        location_altitude, location_latitude, location_longitude
+    ) %>%
+    mutate(
+        date = lubridate::ymd( as.Date(`_savepoint_timestamp` ) ) ,
+        altitude = as.numeric( location_altitude), 
+        latitude = as.numeric( location_latitude), 
+        longitude = as.numeric( location_longitude)
+    )
+
+glimpse(cen)
+
+n_distinct(cen$houseNumber)
+range(cen$placeName)
+```
+
+# Survey Weights
+
+```{r}
+class1 = readxl::read_excel(
+    'MIS 2015 Data/Copy of weight for MIS-2015_final.xls',
+    sheet = 'class1') %>%
+    rename( EA = `84` ,
+            ClusterID = `CLUSTER-ID` ,
+            weight.hh = `HH design weight W` ,
+            stratNumber = `Stratum number` )
+
+class2 = readxl::read_excel(
+    'MIS 2015 Data/Copy of weight for MIS-2015_final.xls',
+    sheet = 'class2') %>%
+    rename( ClusterID = X__1 ,
+            weight.hh = `HH design weight W` )
+# View(ea)
+
+glimpse(class1)
+glimpse(class2)
+
+weights = bind_rows( class1, class2 )
+
+# strata
+# count( weights, stratNumber )
+# count(weights, TOWN) # 83
+# count(weights, REGION) # 10
+# count(weights, `UR/RU`) # 2
+# count(weights, `SUBCITY`) # 2
+# count(weights, CLASS) # 2
+
+```
+
+- The 'Stratum number' variable has `r length( unique(weights$stratNumber ) )` levels and will be used as the strata variable for survey estimations
+
+## Join weights with ea file EA Name variable
+
+```{r}
+
+# 1. Link ea with  complete wieghts dataset  so that we can be sure the link correctly
+# matches the region, zone, district, etc.
+
+ eaw = left_join( ea, weights, by = c('EA Code' = 'ClusterID' ))
+ 
+ # all match
+ # anti_join( ea, weights, by = c('EA Code' = 'ClusterID' ))
+ # anti_join(  weights, ea, by = c( 'ClusterID' = 'EA Code'))
+
+ # glimpse(eaw)
+ 
+ # confirm names ok
+ # sum(eaw$Region %in% eaw$REGION)
+ # count( eaw[ !eaw$Region %in% eaw$REGION,] , Region, REGION ) #OK
+ # 
+ # sum(eaw$Zone %in% eaw$ZONE)
+ # count( eaw[ !eaw$Zone %in% eaw$ZONE,] , Zone, ZONE ) #OK
+ # 
+ # sum(eaw$Woreda %in% eaw$WEREDA)
+ # count( eaw[ !eaw$Woreda %in% eaw$WEREDA,] , Woreda, WEREDA ) #OK
+ 
+ # select needed variables
+ 
+# 2. Repeat link with only the needed variables from weights
+ eaw = left_join( ea, 
+                   weights %>% select('ClusterID', `Stratum number`, weight.hh ), 
+                   by = c('EA Code' = 'ClusterID' )) %>%
+     mutate( ea = as.character(`EA Code`) )
+ 
+ glimpse(eaw)
+```
+
+## Household file
+
+- selecting key fields: household_id, member_id, gender, age_in_months, age_in_years, sleep_under_net, rdt_result, blood_slide, dbs, barcode, ethnicity 
+
+```{r}
+# get cell names and specify types
+
+h_raw = readxl::read_excel("MIS 2015 Data/household mobile.xlsx", 
+    sheet = "Duplicates Removed" ,
+    col_types = c("text")
+) 
+
+glimpse(h_raw)
+
+# _id versus household_id
+# n_distinct(h_raw$`_id`)
+# n_distinct(h_raw$household_id)
+# sum( h_raw$`_id` == h_raw$household_id, na.rm = T)
+
+# names(h_raw)
+
+# h = h_raw %>%
+#     select( household_id, member_id, gender, age_in_months, age_in_years, sleep_under_net,
+#             rdt_result, blood_slide, dbs, barcode, ethnicity ) %>%
+#     mutate( age_in_years = as.integer(age_in_years) , 
+#             age_in_months = as.integer(age_in_months) 
+#             )
+
+h_id = h_raw %>% 
+    # select( `_id`, household_id , `_savepoint_timestamp`, 
+    #         ea , selected , region , zone , district, 
+    #         gps_location_latitude, gps_location_longitude, gps_location_altitude 
+    #         ) %>%
+    mutate(
+        date = lubridate::ymd( as.Date(`_savepoint_timestamp` ) ) ,
+        altitude = as.numeric( gps_location_altitude), 
+        latitude = as.numeric( gps_location_latitude), 
+        longitude = as.numeric( gps_location_longitude)
+    )    %>%
+    select( -gps_location_latitude, 
+            -gps_location_longitude, 
+            -gps_location_altitude
+            )
+
+glimpse( h_id )
+
+bind_cols( 
+    ea =  n_distinct( h_id$ea),
+    id = n_distinct( h_id$household_id) ,
+    region = n_distinct( h_id$region)
+)
+```
+
+
+## Load household member file get basic description of raw data
+
+- selecting key fields: household_id, member_id, gender, age_in_months, age_in_years, sleep_under_net, rdt_result, blood_slide, dbs, barcode, ethnicity 
+
+```{r}
+# get cell names and specify types
+
+hm_raw = readxl::read_excel("MIS 2015 Data/household_member_mobile.xlsx", 
+    sheet = "Duplicates Removed" ,
+    col_types = c("text")
+) 
+
+# glimpse(hm_raw)
+
+# n_distinct(hm_raw$`_id`)
+# n_distinct(hm_raw$member_id)
+# sum( hm_raw$`_id` == hm_raw$member_id, na.rm = T)
+
+hm = hm_raw %>%
+    # select( household_id, member_id,  gender, age_in_months, age_in_years,
+    #         live_here, stay_here_last_night, sleep_under_net,
+    #         rdt_result, blood_slide, dbs, barcode, ethnicity ) %>%
+    mutate( age_in_years = as.integer(age_in_years) , 
+            age_in_months = as.integer(age_in_months) 
+            )
+
+
+```
+
+
+## Create variables for Pf and Po (other plasmodia)
+
+RDT result is coded as 1 = pf, 2 = Pv/Po/Pm, 3 = pf/mixed, 4 = negaative, 5 = invalid.
+
+- Created pf_rdt variable: 1<- if 1 or 3 ; 0<- if 2 or 4   
+- Created po_rdt (other) variable: 1 <- if 2 or 3 ; 0 <- if 1 or 4
+
+```{r}
+
+hm = hm %>%
+    mutate(
+        # pf 
+        # if RDT = 1 (pf) or 3 (pf/mixed), then pf pos (1); 
+        # if RDT = 2 (Pv/Po/Pm) or 4 (negative), then pf neg (0), 
+        # if RDT = 5 (invalid) or missing, then NA
+        pf_rdt = ifelse( rdt_result %in% c("1", "3") , 1, 
+                     ifelse( rdt_result %in% c("2", "4") , 0 , NA ) 
+                     ) ,
+        
+        # po
+        # if RDT = 2 (Pv/Po/Pm) or 3 (pf/mixed), then po pos (1); 
+        # if RDT = 1 (pf) or 4 (negative), then p0 neg (0), 
+        # if RDT = 5 (invalid) or missing, then NA
+        po_rdt = ifelse( rdt_result %in% c("2", "3") , 1, 
+                     ifelse( rdt_result %in% c("1", "4") , 0 , NA ) 
+                     ) 
+        
+        
+    )
+```
+
+
+## Join datasets
+
+- There are `r comma( nrow(hm) )` household member records  
+- There are `r comma( nrow(h_id) )` household records  
+
+```{r}
+
+# ec = inner_join( ea, cen_raw, by = c('EA Code' = 'placeName') )
+# nrow(ea); nrow(cen_raw); nrow(ec)
+# 
+# ch = inner_join(cen_raw, h_raw, by = c('_id' = '_id'))
+# nrow(h_raw); nrow(ch)
+
+# Join with h file by household_id, or _id?  more matches with _id
+# n_distinct(hm$household_id)
+# anti_join(hm, h_raw, by = c( 'household_id' = '_id' ))
+# anti_join(hm, h_raw, by = c( 'household_id' = 'household_id' ))
+
+
+hhm = inner_join(h_id, hm, by = c('_id' = 'household_id')) %>%
+    select( -`_id` )
+
+# glimpse(hhm)
+
+# Check ea codes
+count( hhm, ea) # 555 + NA
+
+sum( is.na( hhm$ea)) # 878 NA
+
+count( hhm, region, zone, district ) #328
+# nrow(hm); nrow(hhm)
+
+
+
+```
+
+- There are `r comma( nrow(hhm) )` linked household-household member records  
+
+- Join weights with house-houseMember-serology files
+
+```{r}
+
+hhmw = inner_join( eaw, hhm, by = 'ea' ) 
+
+# unmatched
+# anti_join( eaw, hhm,  by = 'ea') 
+# anti_join(  hhm, eaw,  by = 'ea' ) 
+
+```
+
+- All eaw records match with hhm record  
+- `r nrow(anti_join(  hhm, eaw,  by = 'ea' ) )` hhm records did not match with eaw because the ea is missing from `r sum(is.na(hhm$ea))` hhm records.  
+
+# Serology 
+
+## Serology dataset
+
+```{r}
+
+MIS_2015_Serology_Results <- readxl::read_excel("MIS 2015 Data/MIS 2015_Serology_Results.xlsx")
+
+# View(MIS_2015_Serology_Results)
+
+ sero_file = 'MIS 2015 Data/MIS 2015_Serology_Results.xlsx'
+ 
+ sero =  readxl::read_excel( sero_file , 
+                             sheet = "FI - Bkgd" , 
+                             col_types = c( rep("text",3), rep('numeric',14) ) 
+                             ) %>% 
+     select( 1:17 ) %>%
+     filter( !is.na(Barcode) )
+ 
+ glimpse(sero)
+ # Hmisc::describe( sero )
+ # nrow(sero)
+ 
+ # check for duplicate serology barcodes
+    serology_dublicate_barcodes = count(sero, Barcode) %>% filter(n>1) 
+    write_csv(serology_dublicate_barcodes, 
+              'MIS 2015 Data/serology_duplicate_barcodes.csv' )
+     
+ # filter hhmw to those with barcode
+ hhmwb = hhmw %>% filter( !is.na(barcode) )
+ # glimpse(hmb)
+ 
+ shm =inner_join( hhmwb, sero, by = c( 'barcode' = 'Barcode' ) )
+ # glimpse(shm)
+ 
+  ashm = anti_join( sero, hhmwb, by = c( 'Barcode' = 'barcode' ) ) %>%
+      select( Barcode )
+  write_csv(ashm, 
+              'MIS 2015 Data/unmatched_serology_barcodes.csv' )
+  # glimpse( ashm )
+  
+```
+
+- `r nrow(serology_dublicate_barcodes)` records in the serology file have duplicate barcodes.
+
+- `r nrow(ashm)` records are in the serology file but do not have a matching barcode in the combined household-household member file.
+
+```{r}
+    hshm = inner_join(h_id, shm, by = c('_id' = 'household_id'))
+    # nrow(h_id); nrow(shm); nrow(hshm)
+
+    # check for duplicate serology barcodes
+    count(sero, Barcode) %>% filter(n>1) 
+    
+    
+    # check for duplicate barcodes in MIS
+    hmb_dublicate_barcodes = hhmwb %>%
+        group_by( barcode) %>%
+        mutate( n = n() ) %>%
+        filter( n > 1 ) 
+    
+    hmb_dublicate_barcodes
+    write_csv(hmb_dublicate_barcodes, 
+              'MIS 2015 Data/hmb_dublicate_barcodes.csv' )
+    
+    
+    hshm_dublicate_barcodes = count(hshm, barcode) %>% filter(n>1) 
+    hshm_dublicate_barcodes
+    write_csv(hshm_dublicate_barcodes, 
+              'MIS 2015 Data/hshm_dublicate_barcodes.csv' )
+    
+
+    # are any of the hmb duplicates in the hshm duplicates?
+    sapply( hmb_dublicate_barcodes$barcode ,
+            function(x) grepl(x, paste( hshm_dublicate_barcodes$barcode, collapse = ' ' ) )
+    )
+    
+  write_csv(hshm, "MIS 2015 Data/hshm.csv" )
+  
+  # hshm = read_csv("MIS 2015 Data/hshm.csv")
+```
+
+- `r nrow(hshm_dublicate_barcodes)` records in the combined household-household member file have duplicate barcodes.
+
+
+## Summary of Linkage with Household/Household members
+
+- There are `r comma(nrow(hmb))` household member records with a barcode   
+- There are `r comma(nrow(sero))` serology records with a barcode  
+
+- Combined, there are `r comma(nrow(hshm))` linked household member records with serology data
+
+- `r percent( nrow(hshm) / nrow(sero) )` of serology results were linked with an individual from the survey
+
+- All of the records have linked household data
+
+**Can we link more household member records linked with serology?**
+Unfortunately no, because there are no variables other than barcode to use for linking.  The failures to link are probably due to data entry errors.  As noted, there are a number of duplicate barcodes.  Additionally, the length of the barcode is not consistent:
+
+`r   print( bind_rows(table( nchar(sero$Barcode) ), table( nchar( hmb$barcode))) )` 
+
+So, one form of error appears to be a dropped or added character, although this accounts for only some of the linking failures.  
+
+*It is important to note that there is also a possibility that, just as data entry error causes some records not to link, it is equally probable that some records are linked incorrectly.*  
+
+**The combined linked file is "hshm.csv"**
+
+Here is a list of the variables and first few data elements:
+
+```{r}
+ glimpse(hshm)
+```
+
+## Serology Cut-offs (taken from ppt and put into excel)
+
+**TODO- Apply cutpoints to data set...**
+
+```{r}
+ cutoffs = readxl::read_excel( 'MIS 2015 Data/cutoffs.xlsx' ) 
+ glimpse( cutoffs )
+ 
+ hshm.c = hshm %>%
+     mutate(
+         `PfAMA1(43)`
+     )
+ 
+```
+
+
+**Summarise**
+
+# Data Summary (Unweighted)
+
+## Summarise RDT by Age Group
+
+note: pf_rdt.n is the number with a pf_rdt result;  po_rdt.n is the number with a po_rdt (other plasmodia) result.
+
+```{r}
+hshm.age = hshm %>%
+    mutate( age_group = cut( age_in_years ,
+                             c(0, 5, 10, 15, 20, 30, 40, 50, Inf),
+                             c('<6', '6-10', '11-15', '16-20', '21-30', '31-40', '41-50', '50+' ) ,
+                             include.lowest = TRUE
+                             ) 
+    ) %>%
+    group_by( age_group ) %>%
+    summarise(
+        n = n(), 
+        pf_rdt.n = sum( pf_rdt %in% 0:1 ) ,
+        po_rdt.n = sum( po_rdt %in% 0:1 ),
+        pf_rdt = sprintf( '%1.1f%%', 100 * mean(pf_rdt, na.rm = T) ),
+        po_rdt = sprintf( '%1.1f%%', 100 * mean(po_rdt, na.rm = T) )
+    )
+
+knitr::kable(hshm.age)        
+
+```
+
+
+## Summarise RDT by Altitude
+
+```{r}
+hshm.alt= hshm %>%
+    mutate( altitude.cat = cut( altitude ,
+                             c(0, 1000, 2000, Inf),
+                             c('<=1000', '1001-2000', '>2000' ) ,
+                             include.lowest = TRUE
+                             ) 
+    ) %>%
+    group_by( altitude.cat ) %>%
+    summarise(
+        n = n(), 
+        pf_rdt.n = sum( pf_rdt %in% 0:1 ) ,
+        po_rdt.n = sum( po_rdt %in% 0:1 ),
+        pf_rdt = sprintf( '%1.1f%%', 100 * mean(pf_rdt, na.rm = T) ),
+        po_rdt = sprintf( '%1.1f%%', 100 * mean(po_rdt, na.rm = T) )
+    )
+
+knitr::kable(hshm.alt )       
+
+```
+
+# Data Summary (Weighted)
+
+## Summarise RDT by Age Group
+
+note: pf_rdt.n is the number with a pf_rdt result;  po_rdt.n is the number with a po_rdt (other plasmodia) result.
+
+```{r}
+hshm.age = hshm %>%
+    mutate( age_group = cut( age_in_years ,
+                             c(0, 5, 10, 15, 20, 30, 40, 50, Inf),
+                             c('<6', '6-10', '11-15', '16-20', '21-30', '31-40', '41-50', '50+' ) ,
+                             include.lowest = TRUE
+                             ) 
+    ) %>%
+    group_by( age_group ) %>%
+    summarise(
+        n = n(), 
+        pf_rdt.n = sum( pf_rdt %in% 0:1 ) ,
+        po_rdt.n = sum( po_rdt %in% 0:1 ),
+        pf_rdt = sprintf( '%1.1f%%', 100 * mean(pf_rdt, na.rm = T) ),
+        po_rdt = sprintf( '%1.1f%%', 100 * mean(po_rdt, na.rm = T) )
+    )
+
+knitr::kable(hshm.age)        
+
+```
+
+
+## Summarise RDT by Altitude
+
+```{r}
+hshm.alt= hshm %>%
+    mutate( altitude.cat = cut( altitude ,
+                             c(0, 1000, 2000, Inf),
+                             c('<=1000', '1001-2000', '>2000' ) ,
+                             include.lowest = TRUE
+                             ) 
+    ) %>%
+    group_by( altitude.cat ) %>%
+    summarise(
+        n = n(), 
+        pf_rdt.n = sum( pf_rdt %in% 0:1 ) ,
+        po_rdt.n = sum( po_rdt %in% 0:1 ),
+        pf_rdt = sprintf( '%1.1f%%', 100 * mean(pf_rdt, na.rm = T) ),
+        po_rdt = sprintf( '%1.1f%%', 100 * mean(po_rdt, na.rm = T) )
+    )
+
+knitr::kable(hshm.alt )       
+
+```
+
+## Summarise travel history
+
+- Load Eth Geo Area for travel history
+
+```{r}
+
+eageo = readxl::read_excel('MIS 2015 Data/Eth Geo Area.xlsx')
+# View(eageo)
+glimpse(eageo)
+```
+
+
+# MAP of Households
+
+```{r, warning=FALSE}
+library(leaflet)
+
+pal <- colorNumeric(
+  palette = "Blues",
+  domain = range( as.numeric(h_id$ea), na.rm = TRUE ) 
+)
+
+m = leaflet( data = h_id  ) %>% 
+               addProviderTiles("OpenStreetMap.France", group = "OpenStreetMap") %>%
+               addProviderTiles("Stamen.TonerLite", group = "Toner Lite") %>%
+               addProviderTiles( "OpenMapSurfer.Roads", group = "Roads" ) %>%
+               addLabelOnlyMarkers(  
+                    data =  h_id , 
+                    ~longitude, 
+                    ~latitude,
+                    label =  'x' #~as.character( ea )
+                ) %>%
+         addCircles(
+                  # popup = popup_cluster(),
+                  lng = ~longitude, lat = ~latitude,
+                  radius = 20, #~Survey_Weight*6e3,
+                  stroke = TRUE,
+                  weight = 1,
+                  color = 'black',
+                  opacity = .7 ,
+                  fill = TRUE ,
+                  fillColor =  ~pal( as.numeric(ea) ),
+                  fillOpacity = .7 ,
+                  group = "Sampling clusters"
+               ) %>%
+               addLayersControl(
+                  # overlayGroups = c("Admin areas", "Sampling clusters", "Data Labels", "Admin Labels"),
+                  baseGroups = c("OpenStreetMap", "Toner Lite", "Roads"),
+                  options = layersControlOptions(collapsed = FALSE),
+                  position = "bottomleft"
+               )  
+# %>%    
+#     addLegend(
+#         position = 'bottomright',
+#         pal = pal ,
+#         values = ~as.numeric(ea)  , 
+#         opacity = 1,
+#         title = 'An Obvious Legend'
+#     )
+
+m
+
+
+```
+
